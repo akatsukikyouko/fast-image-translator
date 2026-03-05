@@ -9,7 +9,6 @@
 // @grant        GM_addStyle
 // @grant        GM_setValue
 // @grant        GM_getValue
-// @connect      172.23.15.113
 // @connect      *
 // @run-at       document-end
 // ==/UserScript==
