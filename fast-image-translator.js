@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         快速图片翻译fast-image-translator
 // @namespace    http://tampermonkey.net/
-// @version      3.0.0
+// @version      3.1.0
 // @description  得益于Qwen3.5-35B-A3B这样强大的模型，我们可以本地部署强大的基于图片LLM的翻译服务了！右键配置LLM，可选择纯文字翻译（对于X这样无法直接替换图片的网站）。
 // @author       AkatsukiKyouko
 // @match        *://*/*
@@ -9,6 +9,7 @@
 // @grant        GM_addStyle
 // @grant        GM_setValue
 // @grant        GM_getValue
+// @grant        GM_registerMenuCommand
 // @connect      *
 // @run-at       document-end
 // ==/UserScript==
@@ -26,13 +27,17 @@
         strokeWidth: 3,
         textColor: '#FFFFFF',
         strokeColor: '#000000',
-        minImageSize: 60,
+        minImageSize: 150, // 提高最小图片尺寸，避免小图片显示图标
+        minImageArea: 15000, // 添加最小面积检测（宽*高）
         sizeMapping: { 'small': 0.9, 'medium': 1.0, 'large': 1.2 },
         primaryGradient: 'linear-gradient(135deg, rgba(255, 182, 193, 0.8) 0%, rgba(255, 105, 180, 0.8) 100%)'
     };
 
-    // 获取当前网站是否开启“一律文字翻译”
+    // 获取当前网站是否开启"一律文字翻译"
     const isAlwaysTextMode = () => GM_getValue('always_text_' + location.hostname, false);
+
+    // 获取当前网站是否隐藏图标
+    const isHideIcon = () => GM_getValue('hide_icon_' + location.hostname, false);
 
     // ================= [2. UI 样式] =================
     GM_addStyle(`
@@ -62,9 +67,33 @@
         .it-set-box label { display:block; margin: 10px 0 5px; font-size:12px; color:#bbb; }
         .it-set-box input { width:100%; background:#2a2a2a; border:1px solid #444; color:#fff; padding:8px; border-radius:4px; box-sizing:border-box; outline:none; }
         .it-set-btn { background:#ff69b4; color:white; border:none; padding:10px; border-radius:4px; cursor:pointer; width:100%; margin-top:20px; font-weight:bold; }
+
+        /* 全局加载提示 */
+        .it-global-loading { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); background: rgba(30, 30, 30, 0.95); border: 2px solid #ff69b4; border-radius: 12px; padding: 30px 40px; color: #fff; font-size: 16px; z-index: 2147483647; display: flex; flex-direction: column; align-items: center; gap: 15px; box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5); backdrop-filter: blur(8px); }
+        .it-loading-spinner { width: 40px; height: 40px; border: 4px solid rgba(255, 105, 180, 0.3); border-top-color: #ff69b4; border-radius: 50%; animation: it-spin 1s linear infinite; }
+        @keyframes it-spin { to { transform: rotate(360deg); } }
     `);
 
     const processedImages = new WeakSet();
+    let lastRightClickedImage = null; // 记录最后右键点击的图片
+    let globalLoadingEl = null; // 全局加载提示元素
+
+    // 显示全局加载提示
+    function showGlobalLoading(text = '正在翻译中，请稍候...') {
+        if (globalLoadingEl) return;
+        globalLoadingEl = document.createElement('div');
+        globalLoadingEl.className = 'it-global-loading';
+        globalLoadingEl.innerHTML = `<div class="it-loading-spinner"></div><div>${text}</div>`;
+        document.body.appendChild(globalLoadingEl);
+    }
+
+    // 隐藏全局加载提示
+    function hideGlobalLoading() {
+        if (globalLoadingEl) {
+            globalLoadingEl.remove();
+            globalLoadingEl = null;
+        }
+    }
 
     // ================= [3. 强力 JSON 修复引擎] =================
 
@@ -405,15 +434,23 @@
 
     // ================= [4. 翻译引擎] (追加 mode) =================
 
-    async function doTranslate(img, btn, wrapper, mode = 'auto') {
-        if (btn.classList.contains('it-loading')) return;
+    async function doTranslate(img, btn, wrapper, mode = 'auto', useGlobalLoading = false) {
+        if (btn && btn.classList.contains('it-loading')) return;
 
         // 如果是自动模式且全局开启了文字翻译，则强制切换到文字翻译
         if (mode === 'auto' && isAlwaysTextMode()) {
             mode = 'text_only';
         }
 
-        btn.classList.add('it-loading'); btn.innerHTML = '❤';
+        if (btn) {
+            btn.classList.add('it-loading');
+            btn.innerHTML = '❤';
+        }
+
+        // 显示全局 loading
+        if (useGlobalLoading) {
+            showGlobalLoading();
+        }
 
         try {
             const blob = await new Promise((res, rej) => {
@@ -469,7 +506,12 @@
             if (!data) throw new Error("JSON 解析及修复均失败");
 
             if (mode === 'text_only') {
-                renderTextPopup(wrapper, data.texts.map(t => t.text).join('\n\n'), btn);
+                if (useGlobalLoading) {
+                    hideGlobalLoading();
+                    showTextOnlyResult(data.texts.map(t => t.text).join('\n\n'));
+                } else {
+                    renderTextPopup(wrapper, data.texts.map(t => t.text).join('\n\n'), btn);
+                }
                 return;
             }
 
@@ -496,15 +538,38 @@
             });
 
             const dataUrl = cvs.toDataURL('image/jpeg', 0.95);
-            const testImg = new Image();
-            testImg.onload = () => { img.src = dataUrl; wrapper.remove(); };
-            testImg.onerror = () => renderTextPopup(wrapper, data.texts.map(t => t.text).join('\n\n'), btn);
-            testImg.src = dataUrl;
+
+            if (useGlobalLoading) {
+                hideGlobalLoading();
+                img.src = dataUrl;
+            } else {
+                const testImg = new Image();
+                testImg.onload = () => { img.src = dataUrl; wrapper.remove(); };
+                testImg.onerror = () => renderTextPopup(wrapper, data.texts.map(t => t.text).join('\n\n'), btn);
+                testImg.src = dataUrl;
+            }
 
         } catch (e) {
-            btn.innerHTML = '✕'; btn.classList.remove('it-loading');
-            setTimeout(() => { btn.innerHTML = '译'; }, 2000);
+            if (useGlobalLoading) {
+                hideGlobalLoading();
+                alert('翻译失败：' + (e.message || '未知错误'));
+            } else if (btn) {
+                btn.innerHTML = '✕';
+                btn.classList.remove('it-loading');
+                setTimeout(() => { btn.innerHTML = '译'; }, 2000);
+            }
         }
+    }
+
+    // 显示纯文字翻译结果
+    function showTextOnlyResult(content) {
+        const mask = document.createElement('div');
+        mask.className = 'it-set-mask';
+        mask.innerHTML = `<div class="it-set-box" style="width: 500px; max-height: 80vh; overflow: auto;"><h3>翻译结果<button class="it-set-close" onclick="this.closest('.it-set-mask').remove()">✕</button></h3><div style="white-space: pre-wrap; line-height: 1.8; font-size: 14px;">${content}</div></div>`;
+        document.body.appendChild(mask);
+        mask.onclick = (e) => {
+            if (e.target === mask) mask.remove();
+        };
     }
 
     function renderTextPopup(wrapper, content, btn) {
@@ -559,8 +624,15 @@
 
     function setupImage(img) {
         if (!img || processedImages.has(img)) return;
+
+        // 检查是否在当前网站隐藏图标
+        if (isHideIcon()) return;
+
         const w = img.naturalWidth || img.width, h = img.naturalHeight || img.height;
+
+        // 改进的图片检测：检查尺寸和面积
         if (w < CONFIG.minImageSize || h < CONFIG.minImageSize) return;
+        if ((w * h) < CONFIG.minImageArea) return;
 
         processedImages.add(img);
         const wrapper = document.createElement('div');
@@ -573,11 +645,15 @@
 
         const updateMenu = () => {
             const alwaysText = isAlwaysTextMode();
+            const hideIcon = isHideIcon();
             menu.innerHTML = `
                 <div class="it-menu-item" data-action="text">📝 文字翻译
                     <span class="it-menu-desc">直接点击翻译失败请使用</span>
                 </div>
                 <div class="it-menu-item" data-action="toggle_always">${alwaysText ? '🔓 解除一律文字翻译' : '🔒 一律文字翻译此网站'}</div>
+                <div class="it-menu-item" data-action="toggle_hide_icon">${hideIcon ? '👁 在此网站显示图标' : '👁‍🗨 在此网站不显示图标'}
+                    <span class="it-menu-desc">隐藏后可通过浏览器菜单启用</span>
+                </div>
                 <div class="it-menu-sep"></div>
                 <div class="it-menu-item" data-action="config">⚙ 设置</div>
             `;
@@ -599,6 +675,11 @@
         btn.onclick = (e) => { e.preventDefault(); e.stopPropagation(); menu.style.display = 'none'; doTranslate(img, btn, wrapper, 'auto'); };
         btn.oncontextmenu = (e) => { e.preventDefault(); e.stopPropagation(); updateMenu(); menu.style.display = (menu.style.display === 'flex' ? 'none' : 'flex'); };
 
+        // 图片右键菜单：记录最后右键点击的图片
+        img.addEventListener('contextmenu', (e) => {
+            lastRightClickedImage = img;
+        });
+
         menu.onclick = (e) => {
             e.stopPropagation();
             const action = e.target.closest('.it-menu-item')?.dataset.action;
@@ -606,6 +687,13 @@
             else if (action === 'toggle_always') {
                 GM_setValue('always_text_' + location.hostname, !isAlwaysTextMode());
                 updateMenu();
+            }
+            else if (action === 'toggle_hide_icon') {
+                GM_setValue('hide_icon_' + location.hostname, !isHideIcon());
+                updateMenu();
+                if (isHideIcon()) {
+                    wrapper.remove();
+                }
             }
             else if (action === 'config') openSettings();
             menu.style.display = 'none';
@@ -619,5 +707,59 @@
     const observer = new MutationObserver(m => { if (m.some(r => r.addedNodes.length > 0)) scan(); });
     scan();
     observer.observe(document.body, { childList: true, subtree: true });
+
+    // ================= [6. 浏览器右键菜单注册] =================
+
+    // 翻译图片（自动模式）
+    GM_registerMenuCommand('📷 翻译图片', () => {
+        let targetImg = lastRightClickedImage;
+        if (!targetImg) {
+            const imgs = Array.from(document.querySelectorAll('img')).filter(img => {
+                const w = img.naturalWidth > 0 ? img.naturalWidth : img.width;
+                const h = img.naturalHeight > 0 ? img.naturalHeight : img.height;
+                const rect = img.getBoundingClientRect();
+                return rect.width > 0 && rect.height > 0;
+            });
+            if (imgs.length > 0) targetImg = imgs[0];
+        }
+
+        if (targetImg) {
+            doTranslate(targetImg, null, null, 'auto', true);
+        }
+    });
+
+    // 翻译图片（文字模式）
+    GM_registerMenuCommand('📝 翻译图片（文字模式）', () => {
+        let targetImg = lastRightClickedImage;
+        if (!targetImg) {
+            const imgs = Array.from(document.querySelectorAll('img')).filter(img => {
+                const w = img.naturalWidth > 0 ? img.naturalWidth : img.width;
+                const h = img.naturalHeight > 0 ? img.naturalHeight : img.height;
+                const rect = img.getBoundingClientRect();
+                return rect.width > 0 && rect.height > 0;
+            });
+            if (imgs.length > 0) targetImg = imgs[0];
+        }
+
+        if (targetImg) {
+            doTranslate(targetImg, null, null, 'text_only', true);
+        }
+    });
+
+    // 切换图标显示/隐藏
+    GM_registerMenuCommand('👁‍🗨 切换图标显示/隐藏', () => {
+        const hideIcon = isHideIcon();
+        GM_setValue('hide_icon_' + location.hostname, !hideIcon);
+        if (hideIcon) {
+            alert('已启用图标显示，刷新页面后生效');
+        } else {
+            alert('已隐藏图标，刷新页面后生效。\n您可以通过浏览器菜单重新启用图标。');
+        }
+    });
+
+    // 打开设置面板
+    GM_registerMenuCommand('⚙ 打开设置面板', () => {
+        openSettings();
+    });
 
 })();
