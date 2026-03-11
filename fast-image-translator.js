@@ -524,7 +524,10 @@
 
             data.texts.forEach(item => {
                 const w = (item.width * cvs.width) / 1000, h = (item.height * cvs.height) / 1000;
-                const x = (item.x * cvs.width) / 1000, y = (item.y * cvs.height) / 1000;
+                // 处理数组格式的坐标（取第一个值）或数值格式
+                const rawX = Array.isArray(item.x) ? item.x[0] : item.x;
+                const rawY = Array.isArray(item.y) ? item.y[0] : item.y;
+                const x = (rawX * cvs.width) / 1000, y = (rawY * cvs.height) / 1000;
                 let fs = Math.max(10, Math.floor(Math.min((cvs.width / 800) * CONFIG.fontSize * (CONFIG.sizeMapping[item.size] || 1.0), h * 0.9)));
                 ctx.font = `bold ${fs}px "Microsoft YaHei"`;
                 let lines = smartWrapText(ctx, item.text, w);
